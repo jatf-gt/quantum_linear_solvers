@@ -1,10 +1,16 @@
+.gitingore
 LICENSE
 README.md
 pyproject.toml
 requirements-dev.txt
 requirements.txt
 setup.py
-dist/quantum_linear_solvers-0.1.dev1+g17fb9c0.tar.gz
+.github/workflows/main.yml
+.idea/.gitignore
+.idea/modules.xml
+.idea/quantum_linear_solvers.iml
+.idea/vcs.xml
+.idea/inspectionProfiles/profiles_settings.xml
 linear_solvers/__init__.py
 linear_solvers/hhl.py
 linear_solvers/linear_solver.py
@@ -46,4 +52,8 @@ quantum_linear_solvers.egg-info/SOURCES.txt
 quantum_linear_solvers.egg-info/dependency_links.txt
 quantum_linear_solvers.egg-info/requires.txt
 quantum_linear_solvers.egg-info/top_level.txt
+test/__init__.py
 test/test_linear_solvers.py
+test/__pycache__/__init__.cpython-38.pyc
+test/__pycache__/test_linear_solvers.cpython-311.pyc
+test/__pycache__/test_linear_solvers.cpython-38.pyc

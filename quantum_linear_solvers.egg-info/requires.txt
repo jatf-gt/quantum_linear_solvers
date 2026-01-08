@@ -1,7 +1,7 @@
 importlib_metadata
-mapomatic==0.6
-mthree==0.24
+mapomatic>=0.13.0
+mthree>=3.0
 pylatexenc
 qiskit-aer
-qiskit-ibmq-provider
-qiskit-terra==0.21
+qiskit_algorithms>=0.3.1
+qiskit<2.0.0,>=1.0.0
