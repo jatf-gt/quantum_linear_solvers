@@ -1,7 +1,0 @@
-importlib_metadata
-mapomatic>=0.13.0
-mthree>=3.0
-pylatexenc
-qiskit-aer
-qiskit_algorithms>=0.3.1
-qiskit<2.0.0,>=1.0.0
