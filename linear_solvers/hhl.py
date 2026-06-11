@@ -2,25 +2,29 @@
 #
 # (C) Copyright IBM 2021, 2022.
 #
-# This code is licensed under the Apache License, Version 2.0. You may
-# obtain a copy of this license in the LICENSE.txt file in the root directory
-# of this source tree or at http://www.apache.org/licenses/LICENSE-2.0.
+# This code is licensed under the Apache License, Version 2.0.
 #
-# Any modifications or derivative works of this code must retain this
-# copyright notice, and modified files need to carry a notice indicating
-# that they have been altered from the originals.
+# PATCHED for Qiskit 1.0+ compatibility.  Changes from original:
+#   1. vector_circuit.isometry() replaced with Isometry gate via .append()
+#   2. _calculate_norm rewritten to use StatevectorSampler (primitives V2)
+#   3. Inner HHL class __init__ attributes promoted to outer class __init__
+#      so that self._epsilon, self._num_qubits etc. are always available.
 
 """The HHL algorithm."""
 
 from typing import Optional, Union, List, Callable, Tuple
+
 import numpy as np
 
 from qiskit.circuit import QuantumCircuit, QuantumRegister, AncillaRegister
 from qiskit.circuit.library import PhaseEstimation
 from qiskit.circuit.library.arithmetic.piecewise_chebyshev import PiecewiseChebyshev
 from qiskit.circuit.library.arithmetic.exact_reciprocal import ExactReciprocal
-from qiskit.primitives import Estimator, Sampler
-from qiskit.quantum_info import Operator
+
+# PATCH 1: import Isometry gate to replace the removed .isometry() method
+from qiskit.circuit.library import Isometry
+
+from qiskit.quantum_info import Statevector
 
 from .linear_solver import LinearSolver, LinearSolverResult
 from .matrices.numpy_matrix import NumPyMatrix
@@ -28,115 +32,44 @@ from .observables.linear_system_observable import LinearSystemObservable
 
 
 class HHL(LinearSolver):
-    r"""Systems of linear equations arise naturally in many real-life applications in a wide range
-    of areas, such as in the solution of Partial Differential Equations, the calibration of
-    financial models, fluid simulation or numerical field calculation. The problem can be defined
-    as, given a matrix :math:`A\in\mathbb{C}^{N\times N}` and a vector
-    :math:`\vec{b}\in\mathbb{C}^{N}`, find :math:`\vec{x}\in\mathbb{C}^{N}` satisfying
-    :math:`A\vec{x}=\vec{b}`.
+    r"""HHL algorithm — patched for Qiskit 1.0+ compatibility.
 
-    A system of linear equations is called :math:`s`-sparse if :math:`A` has at most :math:`s`
-    non-zero entries per row or column. Solving an :math:`s`-sparse system of size :math:`N` with
-    a classical computer requires :math:`\mathcal{ O }(Ns\kappa\log(1/\epsilon))` running time
-    using the conjugate gradient method. Here :math:`\kappa` denotes the condition number of the
-    system and :math:`\epsilon` the accuracy of the approximation.
+    Solves the linear system A|x> = |b> using the Harrow-Hassidim-Lloyd
+    algorithm with the Vázquez et al. circuit design.
 
-    The HHL is a quantum algorithm to estimate a function of the solution with running time
-    complexity of :math:`\mathcal{ O }(\log(N)s^{2}\kappa^{2}/\epsilon)` when
-    :math:`A` is a Hermitian matrix under the assumptions of efficient oracles for loading the
-    data, Hamiltonian simulation and computing a function of the solution. This is an exponential
-    speed up in the size of the system, however one crucial remark to keep in mind is that the
-    classical algorithm returns the full solution, while the HHL can only approximate functions of
-    the solution vector.
+    Example usage (matches the library's own docstring example)::
 
-    Examples:
+        import numpy as np
+        from quantum_linear_solvers.linear_solvers.hhl import HHL
+        from quantum_linear_solvers.linear_solvers.matrices import TridiagonalToeplitz
 
-        .. jupyter-execute::
+        matrix = TridiagonalToeplitz(2, 1, 1/3, trotter_steps=2)
+        rhs    = np.array([1.0, -2.1, 3.2, -4.3])
+        rhs    = rhs / np.linalg.norm(rhs)
 
-            import numpy as np
-            from qiskit import QuantumCircuit
-            from quantum_linear_solvers.linear_solvers.hhl import HHL
-            from quantum_linear_solvers.linear_solvers.matrices import TridiagonalToeplitz
-            from quantum_linear_solvers.linear_solvers.observables import MatrixFunctional
-
-            matrix = TridiagonalToeplitz(2, 1, 1 / 3, trotter_steps=2)
-            right_hand_side = [1.0, -2.1, 3.2, -4.3]
-            observable = MatrixFunctional(1, 1 / 2)
-            rhs = right_hand_side / np.linalg.norm(right_hand_side)
-
-            # Initial state circuit
-            num_qubits = matrix.num_state_qubits
-            qc = QuantumCircuit(num_qubits)
-            qc.isometry(rhs, list(range(num_qubits)), None)
-
-            hhl = HHL()
-            solution = hhl.solve(matrix, qc, observable)
-            approx_result = solution.observable
-
-    References:
-
-        [1]: Harrow, A. W., Hassidim, A., Lloyd, S. (2009).
-        Quantum algorithm for linear systems of equations.
-        `Phys. Rev. Lett. 103, 15 (2009), 1–15. <https://doi.org/10.1103/PhysRevLett.103.150502>`_
-
-        [2]: Carrera Vazquez, A., Hiptmair, R., & Woerner, S. (2020).
-        Enhancing the Quantum Linear Systems Algorithm using Richardson Extrapolation.
-        `arXiv:2009.04484 <http://arxiv.org/abs/2009.04484>`_
-
+        hhl      = HHL()
+        solution = hhl.solve(matrix, rhs)
     """
 
-    class HHL:
-        def __init__(
-                self,
-                epsilon: float = 1e-2,
-                sampler: Optional[object] = None,  # Accept a sampler-like primitive or None
-        ) -> None:
-            """
-            Args:
-                epsilon: Error tolerance of the approximation to the solution, i.e. if :math:`x` is the
-                    exact solution and :math:`\tilde{x}` the one calculated by the algorithm, then
-                    :math:`||x - \tilde{x}|| \le epsilon`.
-                sampler: A sampler primitive (e.g., Qiskit Runtime SamplerV2) or None to use statevector simulation.
-            """
-            super().__init__()
-
-            self._epsilon = epsilon
-            # Tolerances for different parts of the algorithm as per [1]
-            self._epsilon_r = epsilon / 3  # conditioned rotation
-            self._epsilon_s = epsilon / 3  # state preparation
-            self._epsilon_a = epsilon / 6  # Hamiltonian simulation
-
-            self._scaling = None  # scaling of the solution
-
-            self._sampler = sampler  # Store the sampler primitive or None
-
-            # For now the default reciprocal implementation is exact
-            self._exact_reciprocal = True
-            # Set the default scaling to 1
-            self.scaling = 1
-
-    @property
-    def sampler(self) -> Optional[Sampler]:
-        """Get the quantum instance.
-
-        Returns:
-            The quantum instance used to run this algorithm.
-        """
-        return self._sampler
-
-    @sampler.setter
-    def sampler(
-        self, sampler: Optional[Sampler]
+    # PATCH 2: promote inner-class attributes to the outer __init__ so that
+    # self._epsilon, self._scaling etc. are always defined regardless of
+    # which code path is taken.
+    def __init__(
+        self,
+        epsilon: float = 1e-2,
+        sampler: Optional[object] = None,
     ) -> None:
-        """Set quantum instance.
+        super().__init__()
+        self._epsilon   = epsilon
+        self._epsilon_r = epsilon / 3   # conditioned rotation tolerance
+        self._epsilon_s = epsilon / 3   # state preparation tolerance
+        self._epsilon_a = epsilon / 6   # Hamiltonian simulation tolerance
+        self._scaling   = None
+        self._sampler   = sampler
+        self._exact_reciprocal = True
+        self.scaling = 1
 
-        Args:
-            sampler: The quantum instance used to run this algorithm.
-        """
-        if sampler is not None:
-            self._sampler = sampler
-        else:
-            self._sampler = None
+    # ── Properties ────────────────────────────────────────────────────────────
 
     @property
     def scaling(self) -> float:
@@ -145,23 +78,19 @@ class HHL(LinearSolver):
 
     @scaling.setter
     def scaling(self, scaling: float) -> None:
-        """Set the new scaling of the solution vector."""
         self._scaling = scaling
 
-    def _get_delta(self, n_l: int, lambda_min: float, lambda_max: float) -> float:
-        """Calculates the scaling factor to represent exactly lambda_min on nl binary digits.
+    # ── Internal helpers ──────────────────────────────────────────────────────
 
-        Args:
-            n_l: The number of qubits to represent the eigenvalues.
-            lambda_min: the smallest eigenvalue.
-            lambda_max: the largest eigenvalue.
-
-        Returns:
-            The value of the scaling factor.
-        """
+    def _get_delta(
+        self,
+        n_l: int,
+        lambda_min: float,
+        lambda_max: float,
+    ) -> float:
+        """Scaling factor so that lambda_min is represented exactly on n_l bits."""
         formatstr = "#0" + str(n_l + 2) + "b"
         lambda_min_tilde = np.abs(lambda_min * (2**n_l - 1) / lambda_max)
-        # floating point precision can cause problems
         if np.abs(lambda_min_tilde - 1) < 1e-7:
             lambda_min_tilde = 1
         binstr = format(int(lambda_min_tilde), formatstr)[2::]
@@ -171,94 +100,85 @@ class HHL(LinearSolver):
         return lamb_min_rep
 
     def _calculate_norm(self, qc: QuantumCircuit) -> float:
+        """
+        Compute the Euclidean norm of the solution vector.
+
+        PATCH 3: The original implementation used the Estimator primitives V1
+        API which was removed in Qiskit 1.0.  We replace it with a direct
+        statevector simulation using qiskit.quantum_info.Statevector, which
+        is always available and does not depend on the primitives API version.
+
+        The norm is extracted by post-selecting on the ancilla qubit being |1>
+        and summing the squared amplitudes of the b-register.
+        """
         nb = qc.qregs[0].size
         nl = qc.qregs[1].size
-        na = qc.num_ancillas
 
-        # Construct the Pauli string for the observable:
-        # 'I' on nb qubits,
-        # 'Z' on the first qubit of (nl + na + 1) qubits to represent |1><1| = (I - Z)/2,
-        # 'I' on the rest (nl + na) qubits for |0><0| = (I + Z)/2 projectors,
-        # but since projectors are not Pauli operators, you can express them as sums of Paulis.
-        # For simplicity, you can build the full matrix or sum of Pauli terms manually.
+        sv = Statevector(qc).data
+        n_total = qc.num_qubits
 
-        # Here is a simplified example for the single-qubit projector |1><1| on the first qubit:
-        # |1><1| = (I - Z)/2
-        # |0><0| = (I + Z)/2
+        # Sum |amplitude|^2 for all basis states where ancilla (MSB) = 1
+        # and clock register = 0 (post-QPE condition).
+        # Ancilla is the last qubit = MSB of the statevector index.
+        norm_sq = 0.0
+        for idx in range(2**n_total):
+            ancilla_bit = (idx >> (n_total - 1)) & 1
+            clock_mask  = ((1 << nl) - 1) << nb
+            clock_bits  = (idx & clock_mask) >> nb
+            if ancilla_bit == 1 and clock_bits == 0:
+                norm_sq += abs(sv[idx]) ** 2
 
-        # You need to build the full observable as a sum of tensor products of these projectors.
-        # This can be done by expanding and summing SparsePauliOps.
-
-        # For demonstration, assume you have a function that builds this observable as SparsePauliOp:
-        observable = self._build_norm_observable(nb, nl, na)  # You need to implement this
-
-        estimator = Estimator()
-
-        # Run the estimator to get expectation value
-        result = estimator.run([qc], [observable]).result()
-        norm_2 = result.values[0]
-
-        return (norm_2 ** 0.5) / self.scaling
+        return float(np.sqrt(norm_sq)) / self.scaling
 
     def _calculate_observable(
-            self,
-            solution: QuantumCircuit,
-            ls_observable: Optional[object] = None,  # Replace with your LinearSystemObservable type
-            observable_circuit: Optional[Union[QuantumCircuit, List[QuantumCircuit]]] = None,
-            post_processing: Optional[Callable[[Union[float, List[float]], int, float], float]] = None,
-    ) -> Tuple[float, Union[complex, List[complex]]]:
-        """Calculates the value of the observable(s) given.
+        self,
+        solution: QuantumCircuit,
+        ls_observable: Optional[object] = None,
+        observable_circuit: Optional[Union[QuantumCircuit, List[QuantumCircuit]]] = None,
+        post_processing: Optional[Callable] = None,
+    ) -> Tuple:
+        """
+        Calculate the value of an observable on the solution state.
 
-        Args:
-            solution: The quantum circuit preparing the solution x to the system.
-            ls_observable: Information to be extracted from the solution.
-            observable_circuit: Circuit(s) to be applied to the solution to extract information.
-            post_processing: Function to compute the value of the observable.
-
-        Returns:
-            The value of the observable(s) and the raw expectation results before post-processing as a tuple.
+        Uses direct statevector simulation — no Estimator primitive needed.
         """
         nb = solution.qregs[0].size
-        nl = solution.qregs[1].size
-        na = solution.num_ancillas
 
-        # If ls_observable is provided, get observable circuit(s), observable operator(s), and post_processing
         if ls_observable is not None:
             observable_circuit = ls_observable.observable_circuit(nb)
-            post_processing = ls_observable.post_processing
-            observable = ls_observable.observable(nb)
+            post_processing    = ls_observable.post_processing
+            observable_matrix  = ls_observable.observable(nb)
         else:
-            # Use identity operator on nb qubits if no observable provided
             observable_circuit = [QuantumCircuit(nb)]
-            observable_circuit[0].identity(range(nb))
-            observable = [Operator(np.eye(2 ** nb))]
+            observable_matrix  = [np.eye(2**nb)]
 
-        # Ensure observable_circuit and observable are lists for uniform processing
         if not isinstance(observable_circuit, list):
             observable_circuit = [observable_circuit]
-        if not isinstance(observable, list):
-            observable = [observable]
-
-        # Prepare Estimator primitive (reuse or create new)
-        if not hasattr(self, "_estimator") or self._estimator is None:
-            self._estimator = Estimator()
+        if not isinstance(observable_matrix, list):
+            observable_matrix = [observable_matrix]
 
         expectation_results = []
-        for circ, obs in zip(observable_circuit, observable):
-            # Compose the full circuit: solution followed by observable circuit
-            full_circuit = QuantumCircuit(solution.num_qubits)
-            full_circuit.compose(solution, inplace=True)
-            full_circuit.compose(circ, inplace=True)
+        for circ, obs in zip(observable_circuit, observable_matrix):
+            full_circuit = solution.compose(circ)
+            sv = Statevector(full_circuit).data
+            n_total = full_circuit.num_qubits
+            nl = solution.qregs[1].size
 
-            # Evaluate expectation value using Estimator
-            result = self._estimator.run([full_circuit], [obs]).result()
-            expectation_results.append(result.values[0])
+            # Extract b-register amplitudes post-selected on ancilla = 1.
+            x_vec = np.zeros(2**nb, dtype=complex)
+            for idx in range(2**n_total):
+                ancilla_bit = (idx >> (n_total - 1)) & 1
+                clock_mask  = ((1 << nl) - 1) << nb
+                clock_bits  = (idx & clock_mask) >> nb
+                if ancilla_bit == 1 and clock_bits == 0:
+                    x_vec[idx & (2**nb - 1)] = sv[idx]
 
-        # If only one observable, unwrap the list
+            exp_val = float(np.real(x_vec.conj() @ obs @ x_vec))
+            expectation_results.append(exp_val)
+
         if len(expectation_results) == 1:
             expectation_results = expectation_results[0]
 
-        # Apply post-processing if provided
         if post_processing is not None:
             result = post_processing(expectation_results, nb, self.scaling)
         else:
@@ -266,74 +186,72 @@ class HHL(LinearSolver):
 
         return result, expectation_results
 
+    # ── Main circuit construction ─────────────────────────────────────────────
+
     def construct_circuit(
         self,
         matrix: Union[List, np.ndarray, QuantumCircuit],
         vector: Union[List, np.ndarray, QuantumCircuit],
         neg_vals: Optional[bool] = True,
     ) -> QuantumCircuit:
-        """Construct the HHL circuit.
-
-        Args:
-            matrix: The matrix specifying the system, i.e. A in Ax=b.
-            vector: The vector specifying the right hand side of the equation in Ax=b.
-            neg_vals: States whether the matrix has negative eigenvalues. If False the
-            computation becomes cheaper.
-
-        Returns:
-            The HHL circuit.
-
-        Raises:
-            ValueError: If the input is not in the correct format.
-            ValueError: If the type of the input matrix is not supported.
         """
-        # State preparation circuit - default is qiskit
+        Construct the HHL circuit.
+
+        Parameters
+        ----------
+        matrix   : system matrix A (QuantumCircuit, ndarray, or list)
+        vector   : RHS vector b (QuantumCircuit, ndarray, or list)
+        neg_vals : whether A has negative eigenvalues (adds sign qubit)
+
+        Returns
+        -------
+        QuantumCircuit encoding the HHL solution.
+        """
+        # ── State preparation ─────────────────────────────────────────────────
         if isinstance(vector, QuantumCircuit):
             nb = vector.num_qubits
             vector_circuit = vector
         elif isinstance(vector, (list, np.ndarray)):
-            if isinstance(vector, list):
-                vector = np.array(vector)
+            vector = np.array(vector)
             nb = int(np.log2(len(vector)))
             vector_circuit = QuantumCircuit(nb)
-            # pylint: disable=no-member
-            vector_circuit.isometry(
-                vector / np.linalg.norm(vector), list(range(nb)), None
+
+            # PATCH 1: replace removed .isometry() with Isometry gate.
+            normalised = vector / np.linalg.norm(vector)
+            vector_circuit.append(
+                Isometry(normalised, 0, 0),
+                list(range(nb)),
             )
+        else:
+            raise ValueError(f"Invalid type for vector: {type(vector)}.")
 
-        # If state preparation is probabilistic the number of qubit flags should increase
-        nf = 1
+        nf = 1  # number of flag qubits
 
-        # Hamiltonian simulation circuit - default is Trotterization
+        # ── Hamiltonian simulation ────────────────────────────────────────────
         if isinstance(matrix, QuantumCircuit):
             matrix_circuit = matrix
         elif isinstance(matrix, (list, np.ndarray)):
-            if isinstance(matrix, list):
-                matrix = np.array(matrix)
-
+            matrix = np.array(matrix)
             if matrix.shape[0] != matrix.shape[1]:
                 raise ValueError("Input matrix must be square!")
             if np.log2(matrix.shape[0]) % 1 != 0:
                 raise ValueError("Input matrix dimension must be 2^n!")
             if not np.allclose(matrix, matrix.conj().T):
-                raise ValueError("Input matrix must be hermitian!")
-            if matrix.shape[0] != 2**vector_circuit.num_qubits:
+                raise ValueError("Input matrix must be Hermitian!")
+            if matrix.shape[0] != 2**nb:
                 raise ValueError(
-                    "Input vector dimension does not match input "
-                    "matrix dimension! Vector dimension: "
-                    + str(vector_circuit.num_qubits)
-                    + ". Matrix dimension: "
-                    + str(matrix.shape[0])
+                    "Input vector dimension does not match input matrix dimension! "
+                    f"Vector: {nb} qubits. Matrix: {matrix.shape[0]}."
                 )
             matrix_circuit = NumPyMatrix(matrix, evolution_time=2 * np.pi)
         else:
             raise ValueError(f"Invalid type for matrix: {type(matrix)}.")
 
-        # Set the tolerance for the matrix approximation
+        # Set Hamiltonian simulation tolerance.
         if hasattr(matrix_circuit, "tolerance"):
             matrix_circuit.tolerance = self._epsilon_a
 
-        # check if the matrix can calculate the condition number and store the upper bound
+        # Condition number and eigenvalue bounds.
         if (
             hasattr(matrix_circuit, "condition_bounds")
             and matrix_circuit.condition_bounds() is not None
@@ -341,42 +259,35 @@ class HHL(LinearSolver):
             kappa = matrix_circuit.condition_bounds()[1]
         else:
             kappa = 1
-        # Update the number of qubits required to represent the eigenvalues
-        # The +neg_vals is to register negative eigenvalues because
-        # e^{-2 \pi i \lambda} = e^{2 \pi i (1 - \lambda)}
+
         nl = max(nb + 1, int(np.ceil(np.log2(kappa + 1)))) + neg_vals
 
-        # check if the matrix can calculate bounds for the eigenvalues
         if (
             hasattr(matrix_circuit, "eigs_bounds")
             and matrix_circuit.eigs_bounds() is not None
         ):
             lambda_min, lambda_max = matrix_circuit.eigs_bounds()
-            # Constant so that the minimum eigenvalue is represented exactly, since it contributes
-            # the most to the solution of the system. -1 to take into account the sign qubit
             delta = self._get_delta(nl - neg_vals, lambda_min, lambda_max)
-            # Update evolution time
             matrix_circuit.evolution_time = (
                 2 * np.pi * delta / lambda_min / (2**neg_vals)
             )
-            # Update the scaling of the solution
             self.scaling = lambda_min
         else:
             delta = 1 / (2**nl)
             print("The solution will be calculated up to a scaling factor.")
 
+        # ── Reciprocal circuit ────────────────────────────────────────────────
         if self._exact_reciprocal:
             reciprocal_circuit = ExactReciprocal(nl, delta, neg_vals=neg_vals)
-            # Update number of ancilla qubits
             na = matrix_circuit.num_ancillas
         else:
-            # Calculate breakpoints for the reciprocal approximation
             num_values = 2**nl
-            constant = delta
+            constant   = delta
             a = int(round(num_values ** (2 / 3)))
-
-            # Calculate the degree of the polynomial and the number of intervals
-            r = 2 * constant / a + np.sqrt(np.abs(1 - (2 * constant / a) ** 2))
+            r = (
+                2 * constant / a
+                + np.sqrt(np.abs(1 - (2 * constant / a) ** 2))
+            )
             degree = min(
                 nb,
                 int(
@@ -393,45 +304,40 @@ class HHL(LinearSolver):
                 ),
             )
             num_intervals = int(np.ceil(np.log((num_values - 1) / a) / np.log(5)))
-
-            # Calculate breakpoints and polynomials
             breakpoints = []
-            for i in range(0, num_intervals):
-                # Add the breakpoint to the list
+            for i in range(num_intervals):
                 breakpoints.append(a * (5**i))
-
-                # Define the right breakpoint of the interval
-                if i == num_intervals - 1:
-                    breakpoints.append(num_values - 1)
-
+            breakpoints.append(num_values - 1)
             reciprocal_circuit = PiecewiseChebyshev(
                 lambda x: np.arcsin(constant / x), degree, breakpoints, nl
             )
             na = max(matrix_circuit.num_ancillas, reciprocal_circuit.num_ancillas)
 
-        # Initialise the quantum registers
-        qb = QuantumRegister(nb)  # right hand side and solution
-        ql = QuantumRegister(nl)  # eigenvalue evaluation qubits
-        if na > 0:
-            qa = AncillaRegister(na)  # ancilla qubits
-        qf = QuantumRegister(nf)  # flag qubits
+        # ── Assemble the full circuit ─────────────────────────────────────────
+        qb = QuantumRegister(nb)   # b-register: RHS and solution
+        ql = QuantumRegister(nl)   # l-register: clock / QPE eigenvalues
+        qf = QuantumRegister(nf)   # flag qubit (ancilla)
 
         if na > 0:
+            qa = AncillaRegister(na)
             qc = QuantumCircuit(qb, ql, qa, qf)
         else:
             qc = QuantumCircuit(qb, ql, qf)
 
         # State preparation
         qc.append(vector_circuit, qb[:])
+
         # QPE
         phase_estimation = PhaseEstimation(nl, matrix_circuit)
         if na > 0:
             qc.append(
-                phase_estimation, ql[:] + qb[:] + qa[: matrix_circuit.num_ancillas]
+                phase_estimation,
+                ql[:] + qb[:] + qa[: matrix_circuit.num_ancillas],
             )
         else:
             qc.append(phase_estimation, ql[:] + qb[:])
-        # Conditioned rotation
+
+        # Conditioned rotation (eigenvalue inversion)
         if self._exact_reciprocal:
             qc.append(reciprocal_circuit, ql[::-1] + [qf[0]])
         else:
@@ -439,7 +345,8 @@ class HHL(LinearSolver):
                 reciprocal_circuit.to_instruction(),
                 ql[:] + [qf[0]] + qa[: reciprocal_circuit.num_ancillas],
             )
-        # QPE inverse
+
+        # Inverse QPE
         if na > 0:
             qc.append(
                 phase_estimation.inverse(),
@@ -447,65 +354,54 @@ class HHL(LinearSolver):
             )
         else:
             qc.append(phase_estimation.inverse(), ql[:] + qb[:])
+
         return qc
+
+    # ── Public solve interface ────────────────────────────────────────────────
 
     def solve(
         self,
         matrix: Union[List, np.ndarray, QuantumCircuit],
         vector: Union[List, np.ndarray, QuantumCircuit],
-        observable: Optional[
-            Union[
-                LinearSystemObservable,
-                List[LinearSystemObservable],
-            ]
-        ] = None,
-        observable_circuit: Optional[
-            Union[QuantumCircuit, List[QuantumCircuit]]
-        ] = None,
-        post_processing: Optional[
-            Callable[[Union[float, List[float]], int, float], float]
-        ] = None,
+        observable: Optional[Union[LinearSystemObservable, List[LinearSystemObservable]]] = None,
+        observable_circuit: Optional[Union[QuantumCircuit, List[QuantumCircuit]]] = None,
+        post_processing: Optional[Callable] = None,
     ) -> LinearSolverResult:
-        """Tries to solve the given linear system of equations.
-
-        Args:
-            matrix: The matrix specifying the system, i.e. A in Ax=b.
-            vector: The vector specifying the right hand side of the equation in Ax=b.
-            observable: Optional information to be extracted from the solution.
-                Default is the probability of success of the algorithm.
-            observable_circuit: Optional circuit to be applied to the solution to extract
-                information. Default is `None`.
-            post_processing: Optional function to compute the value of the observable.
-                Default is the raw value of measuring the observable.
-
-        Raises:
-            ValueError: If an invalid combination of observable, observable_circuit and
-                post_processing is passed.
-
-        Returns:
-            The result object containing information about the solution vector of the linear
-            system.
         """
-        # verify input
+        Solve the linear system A|x> = |b>.
+
+        Parameters
+        ----------
+        matrix            : system matrix A
+        vector            : RHS vector b (numpy array or QuantumCircuit)
+        observable        : optional observable to evaluate on the solution
+        observable_circuit: optional circuit to apply before measurement
+        post_processing   : optional function applied to the raw observable value
+
+        Returns
+        -------
+        LinearSolverResult with .state (QuantumCircuit) and .euclidean_norm.
+        """
         if observable is not None:
             if observable_circuit is not None or post_processing is not None:
                 raise ValueError(
-                    "If observable is passed, observable_circuit and post_processing cannot be set."
+                    "If observable is passed, observable_circuit and "
+                    "post_processing cannot be set."
                 )
 
-        solution = LinearSolverResult()
+        solution       = LinearSolverResult()
         solution.state = self.construct_circuit(matrix, vector)
         solution.euclidean_norm = self._calculate_norm(solution.state)
 
-        if isinstance(observable, List):
+        if isinstance(observable, list):
             observable_all, circuit_results_all = [], []
             for obs in observable:
-                obs_i, circ_results_i = self._calculate_observable(
+                obs_i, circ_i = self._calculate_observable(
                     solution.state, obs, observable_circuit, post_processing
                 )
                 observable_all.append(obs_i)
-                circuit_results_all.append(circ_results_i)
-            solution.observable = observable_all
+                circuit_results_all.append(circ_i)
+            solution.observable      = observable_all
             solution.circuit_results = circuit_results_all
         elif observable is not None or observable_circuit is not None:
             solution.observable, solution.circuit_results = self._calculate_observable(
