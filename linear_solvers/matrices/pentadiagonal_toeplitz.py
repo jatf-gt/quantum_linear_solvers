@@ -1,9 +1,9 @@
 # This code is an adaptation of the TridiagonalToeplitz class from the
-# quantum_linear_solvers library (Vázquez et al., Apache 2.0 licence).
+# quantum_linear_solvers library (V zquez et al., Apache 2.0 licence).
 # Original copyright: (C) Copyright IBM 2020, 2021.
 #
 # Modifications for the pentadiagonal (fourth-order) case:
-#   - Added next-nearest-neighbour off-diagonal (b2, ±2 diagonals)
+#   - Added next-nearest-neighbour off-diagonal (b2,  2 diagonals)
 #   - Generalised _off_diag_circ to accept a stride parameter
 #   - Updated eigs_bounds for the five-point stencil eigenvalue formula
 #   - Updated power() to include both off-diagonal Trotter terms
@@ -14,8 +14,8 @@ from typing import Tuple
 
 import numpy as np
 from scipy.sparse import diags
-from qiskit.circuit import QuantumCircuit, QuantumRegister, AncillaRegister
-from qiskit.circuit.library import UGate, MCMTVChain
+from qiskit.circuit import QuantumCircuit, QuantumRegister
+from qiskit.circuit.library import UGate
 
 from .linear_system_matrix import LinearSystemMatrix
 
@@ -32,7 +32,7 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
         A = a I + b_1 (S + S^\dagger) + b_2 (S^2 + S^{\dagger 2})
 
     where :math:`S` is the shift operator.  The Hamiltonian simulation uses
-    the first-order Lie–Trotter product:
+    the first-order Lie Trotter product:
 
     .. math::
 
@@ -84,7 +84,7 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
         # Override auto-computed trotter_steps if caller supplied one.
         self.trotter_steps = trotter_steps
 
-    # ── Properties ────────────────────────────────────────────────────────────
+    #   Properties  
 
     @property
     def num_state_qubits(self) -> int:
@@ -168,7 +168,7 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
     def trotter_steps(self, trotter_steps: int) -> None:
         self._trotter_steps = trotter_steps
 
-    # ── Matrix and eigenvalue utilities ───────────────────────────────────────
+    #   Matrix and eigenvalue utilities  
 
     @property
     def matrix(self) -> np.ndarray:
@@ -182,22 +182,12 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
         ).toarray()
 
     def eigs_bounds(self) -> Tuple[float, float]:
-        """Return lower and upper bounds on the absolute eigenvalues.
-
-        Eigenvalues of the N×N Dirichlet pentadiagonal Toeplitz matrix:
-
-            λ_k = a + 2·b1·cos(k·π/(N+1)) + 2·b2·cos(2k·π/(N+1))
-
-        for k = 1, ..., N.  All N values are evaluated exactly.
         """
-        n_b = 2 ** self.num_state_qubits
-        k = np.arange(1, n_b + 1)
-        theta = k * np.pi / (n_b + 1)
-        eigs = (
-            self.main_diag
-            + 2.0 * self.off_diag_1 * np.cos(theta)
-            + 2.0 * self.off_diag_2 * np.cos(2.0 * theta)
-        )
+        Return lower and upper bounds on the absolute eigenvalues of the matrix.
+        Uses exact diagonalization since the analytical formula for infinite Toeplitz
+        matrices does not exactly hold for finite truncated pentadiagonal matrices.
+        """
+        eigs = np.linalg.eigvalsh(self.matrix)
         abs_eigs = np.abs(eigs)
         return float(abs_eigs.min()), float(abs_eigs.max())
 
@@ -205,7 +195,7 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
         kappa = np.linalg.cond(self.matrix)
         return kappa, kappa
 
-    # ── Configuration and register management ────────────────────────────────
+    #   Configuration and register management  
 
     def _check_configuration(self, raise_on_failure: bool = True) -> bool:
         valid = True
@@ -218,14 +208,11 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
         return valid
 
     def _reset_registers(self, num_state_qubits: int) -> None:
-        """Reset quantum registers — identical to TridiagonalToeplitz."""
+        """Reset quantum registers."""
         qr_state = QuantumRegister(num_state_qubits, "state")
         self.qregs = [qr_state]
         self._ancillas = []
         self._qubits = qr_state[:]
-        if num_state_qubits > 1:
-            qr_ancilla = AncillaRegister(max(1, num_state_qubits - 1))
-            self.add_register(qr_ancilla)
 
     def _build(self) -> None:
         if self._is_built:
@@ -233,10 +220,10 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
         super()._build()
         self.compose(self.power(1), inplace=True)
 
-    # ── Circuit building blocks ───────────────────────────────────────────────
+    #   Circuit building blocks  
 
     def _main_diag_circ(self, theta: float = 1) -> QuantumCircuit:
-        """Circuit for e^{i·a·I·theta} — identical to TridiagonalToeplitz."""
+        """Circuit for e^{i.a.I.theta} - identical to TridiagonalToeplitz."""
         theta *= self.main_diag
         qc = QuantumCircuit(self.num_state_qubits, name="main_diag")
         qc.x(0)
@@ -254,62 +241,39 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
         qc.control = control
         return qc
 
+
     def _off_diag_circ(
-        self,
-        theta: float,
-        off_diag_val: float,
-        stride: int,
-        name: str,
+        self, theta_val: float, val: float, shift: int, name: str
     ) -> QuantumCircuit:
-        """Circuit for e^{i·b·(S^stride + S†^stride)·theta}.
-
-        For stride=1 this reproduces TridiagonalToeplitz._off_diag_circ
-        exactly, including the unconditional boundary rotation on qr[0].
-
-        For stride=2 the unconditional boundary rotation is OMITTED because
-        the j=0 term of the S^2 ladder involves qr[0] AND qr[2] together —
-        it is handled by the i=0 iteration of the main loop (which applies
-        a CX from qr[0] to qr[2] and then a controlled-U on qr[0]).
-
-        Ancilla sizing matches the original exactly:
-          - Uncontrolled circuit: max(1, n-2) ancillas
-          - Controlled circuit:   max(1, n-1) ancillas  (one extra for control)
+        """Circuit implementing a Toeplitz hopping matrix with offset 2^shift.
+        
+        A shift of 0 corresponds to +-1 (nearest neighbor).
+        A shift of 1 corresponds to +-2 (next-nearest neighbor).
+        
+        This is mathematically equivalent to the standard TridiagonalToeplitz
+        logic acting on the subset of qubits qr[shift : num_state_qubits],
+        because adding 2^shift to a binary integer is exactly the same as adding 1
+        to the integer formed by ignoring the lowest `shift` bits.
         """
-        theta_val = theta * off_diag_val
         n = self.num_state_qubits
+        theta_val *= val
 
         qr = QuantumRegister(n)
-        if n > 1:
-            # Correct ancilla count: n-2, matching TridiagonalToeplitz exactly
-            qr_ancilla = AncillaRegister(max(1, n - 2))
-            qc = QuantumCircuit(qr, qr_ancilla, name=name)
-        else:
-            qc = QuantumCircuit(qr, name=name)
-            qr_ancilla = None
+        qc = QuantumCircuit(qr, name=name)
 
-        # ── Unconditional boundary rotation (stride=1 only) ───────────────────
-        # For stride=1 this is the j=0 term: |0><1| + |1><0| on qr[0] alone.
-        # For stride=2 the j=0 term is |0><2| + |2><0|, which requires two
-        # qubits and is handled by the i=0 loop iteration below.
-        if stride == 1:
-            qc.u(-2 * theta_val, 3 * np.pi / 2, np.pi / 2, qr[0])
+        # Unconditional rotation on the effective LSB (qr[shift])
+        if n > shift:
+            qc.u(-2 * theta_val, 3 * np.pi / 2, np.pi / 2, qr[shift])
 
-        # ── Controlled-rotation ladder ────────────────────────────────────────
-        # For stride s, the hopping term |j><j+s| + |j+s><j| for j=0..n-s-1
-        # is implemented by:
-        #   1. CX from qr[i] to qr[i+stride]  (set up parity)
-        #   2. X on qr[i]; CX chain from qr[i] back to qr[0..i-1]
-        #      (accumulate parity of qubits 0..i-1, controlled-by-0 on qr[i])
-        #   3. Multi-controlled U rotation on qr[i]
-        #   4. Uncompute steps 1-2
-        for i in range(0, n - stride):
+        # Controlled-rotation ladder starting from shift
+        for i in range(shift, n - 1):
             q_controls = []
 
-            qc.cx(qr[i], qr[i + stride])
-            q_controls.append(qr[i + stride])
+            qc.cx(qr[i], qr[i + 1])
+            q_controls.append(qr[i + 1])
 
             qc.x(qr[i])
-            for j in range(i, 0, -1):
+            for j in range(i, shift, -1):
                 qc.cx(qr[i], qr[j - 1])
                 q_controls.append(qr[j - 1])
             qc.x(qr[i])
@@ -317,9 +281,8 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
             if len(q_controls) > 1:
                 ugate = UGate(-2 * theta_val, 3 * np.pi / 2, np.pi / 2)
                 qc.append(
-                    MCMTVChain(ugate, len(q_controls), 1),
+                    ugate.control(len(q_controls)),
                     q_controls[:] + [qr[i]]
-                    + (qr_ancilla[: len(q_controls) - 1] if qr_ancilla else []),
                 )
             else:
                 qc.cu(
@@ -329,41 +292,33 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
 
             # Uncompute
             qc.x(qr[i])
-            for j in range(0, i):
+            for j in range(shift, i):
                 qc.cx(qr[i], qr[j])
             qc.x(qr[i])
-            qc.cx(qr[i], qr[i + stride])
+            qc.cx(qr[i], qr[i + 1])
 
-        # ── Controlled version (used inside QPE) ──────────────────────────────
+        #   Controlled version (used inside QPE)  
         def control(num_ctrl_qubits=1, label=None, ctrl_state=None):
             qr_state = QuantumRegister(n + 1)
-            if n > 1:
-                # Controlled circuit gets n-1 ancillas (one more than uncontrolled)
-                qr_anc = AncillaRegister(max(1, n - 1))
-                qc_ctrl = QuantumCircuit(qr_state, qr_anc, name=name)
-            else:
-                qc_ctrl = QuantumCircuit(qr_state, name=name)
-                qr_anc = None
+            qc_ctrl = QuantumCircuit(qr_state, name=name)
 
             q_ctrl = qr_state[0]
             qr_d = qr_state[1:]
 
-            # Unconditional rotation on qr_d[0], controlled by q_ctrl
-            # (stride=1 only — same logic as uncontrolled version)
-            if stride == 1:
+            if n > shift:
                 qc_ctrl.cu(
                     -2 * theta_val, 3 * np.pi / 2, np.pi / 2, 0,
-                    q_ctrl, qr_d[0],
+                    q_ctrl, qr_d[shift],
                 )
 
-            for i in range(0, n - stride):
+            for i in range(shift, n - 1):
                 q_controls = [q_ctrl]
 
-                qc_ctrl.cx(qr_d[i], qr_d[i + stride])
-                q_controls.append(qr_d[i + stride])
+                qc_ctrl.cx(qr_d[i], qr_d[i + 1])
+                q_controls.append(qr_d[i + 1])
 
                 qc_ctrl.x(qr_d[i])
-                for j in range(i, 0, -1):
+                for j in range(i, shift, -1):
                     qc_ctrl.cx(qr_d[i], qr_d[j - 1])
                     q_controls.append(qr_d[j - 1])
                 qc_ctrl.x(qr_d[i])
@@ -371,9 +326,8 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
                 if len(q_controls) > 1:
                     ugate = UGate(-2 * theta_val, 3 * np.pi / 2, np.pi / 2)
                     qc_ctrl.append(
-                        MCMTVChain(ugate, len(q_controls), 1).to_gate(),
+                        ugate.control(len(q_controls)),
                         q_controls[:] + [qr_d[i]]
-                        + (qr_anc[: len(q_controls) - 1] if qr_anc else []),
                     )
                 else:
                     qc_ctrl.cu(
@@ -382,10 +336,10 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
                     )
 
                 qc_ctrl.x(qr_d[i])
-                for j in range(0, i):
+                for j in range(shift, i):
                     qc_ctrl.cx(qr_d[i], qr_d[j])
                 qc_ctrl.x(qr_d[i])
-                qc_ctrl.cx(qr_d[i], qr_d[i + stride])
+                qc_ctrl.cx(qr_d[i], qr_d[i + 1])
 
             return qc_ctrl
 
@@ -393,18 +347,18 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
         return qc
 
     def _near_off_diag_circ(self, theta: float) -> QuantumCircuit:
-        """e^{i·b1·(S+S†)·theta} — nearest-neighbour, stride=1."""
+        # nearest-neighbour
         return self._off_diag_circ(
-            theta, self.off_diag_1, stride=1, name="near_off"
+            theta, self.off_diag_1, shift=0, name="near_off"
         )
 
     def _next_off_diag_circ(self, theta: float) -> QuantumCircuit:
-        """e^{i·b2·(S²+S†²)·theta} — next-nearest-neighbour, stride=2."""
+        # next-nearest-neighbour
         return self._off_diag_circ(
-            theta, self.off_diag_2, stride=2, name="next_off"
+            theta, self.off_diag_2, shift=1, name="next_off"
         )
 
-    # ── Inverse ───────────────────────────────────────────────────────────────
+    #   Inverse  
 
     def inverse(self) -> "PentadiagonalToeplitz":
         return PentadiagonalToeplitz(
@@ -415,42 +369,22 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
             evolution_time=-1.0 * self.evolution_time,
         )
 
-    # ── Power (QPE interface) ─────────────────────────────────────────────────
+    #   Power (QPE interface)  
 
     def power(self, power: int, matrix_power: bool = False) -> QuantumCircuit:
-        """Build the controlled-power circuit used inside QPE.
-
-        Trotter product for the pentadiagonal case:
-
-            e^{iA·t·p} ≈ e^{ia·t·p}
-                         · [e^{ib1(S+S†)·t·p/m}
-                            · e^{ib2(S²+S†²)·t·p/m}]^m
-
-        The main diagonal commutes with everything and is applied once.
-        The two off-diagonal terms are interleaved m times, with a
-        Strang-splitting half-step bookend on the b1 (nearest-neighbour)
-        term only — exactly as TridiagonalToeplitz does for its single
-        off-diagonal term.  The b2 term has no bookend because
-        _next_off_diag_circ does not apply an unconditional boundary
-        rotation on qr[0].
-        """
+        # Build the controlled-power circuit used inside QPE.
+        # Trotter product for the pentadiagonal case.
+        # The main diagonal commutes with everything and is applied once.
         qc_raw = QuantumCircuit(self.num_state_qubits)
 
         def control(num_ctrl_qubits=1, label=None, ctrl_state=None):
             qr_state = QuantumRegister(self.num_state_qubits + 1, "state")
-            if self.num_state_qubits > 1:
-                qr_ancilla = AncillaRegister(
-                    max(1, self.num_state_qubits - 1)
-                )
-                qc = QuantumCircuit(qr_state, qr_ancilla, name="exp(iHk)")
-            else:
-                qc = QuantumCircuit(qr_state, name="exp(iHk)")
-                qr_ancilla = None
+            qc = QuantumCircuit(qr_state, name="exp(iHk)")
 
             q_control = qr_state[0]
             qr = qr_state[1:]
 
-            # ── Main diagonal: one application at full power·t ────────────────
+            #   Main diagonal: one application at full power.t  
             qc.append(
                 self._main_diag_circ(self.evolution_time * power)
                 .control()
@@ -458,7 +392,7 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
                 [q_control] + qr[:],
             )
 
-            # ── Trotter steps ─────────────────────────────────────────────────
+            #   Trotter steps  
             trotter_steps_new = max(
                 1, int(np.ceil(np.sqrt(power) * self.trotter_steps))
             )
@@ -480,39 +414,23 @@ class PentadiagonalToeplitz(LinearSystemMatrix):
 
             for _ in range(trotter_steps_new):
                 # Full step: nearest-neighbour (b1)
-                if qr_ancilla:
-                    qc.append(
-                        self._near_off_diag_circ(t_step)
-                        .control()
-                        .to_gate(),
-                        [q_control] + qr[:] + qr_ancilla[:],
-                    )
-                else:
-                    qc.append(
-                        self._near_off_diag_circ(t_step)
-                        .control()
-                        .to_gate(),
-                        [q_control] + qr[:],
-                    )
+                qc.append(
+                    self._near_off_diag_circ(t_step)
+                    .control()
+                    .to_gate(),
+                    [q_control] + qr[:]
+                )
 
                 # Full step: next-nearest-neighbour (b2)
                 # Only applies when N >= 4 (num_state_qubits >= 2), which is
                 # guaranteed by PoissonProblem1D4th's N >= 4 constraint.
                 if self.num_state_qubits >= 2:
-                    if qr_ancilla:
-                        qc.append(
-                            self._next_off_diag_circ(t_step)
-                            .control()
-                            .to_gate(),
-                            [q_control] + qr[:] + qr_ancilla[:],
-                        )
-                    else:
-                        qc.append(
-                            self._next_off_diag_circ(t_step)
-                            .control()
-                            .to_gate(),
-                            [q_control] + qr[:],
-                        )
+                    qc.append(
+                        self._next_off_diag_circ(t_step)
+                        .control()
+                        .to_gate(),
+                        [q_control] + qr[:]
+                    )
 
             # Half-step bookend for b1 AFTER the loop (closes the Strang split)
             qc.u(
