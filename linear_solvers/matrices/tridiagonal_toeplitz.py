@@ -360,7 +360,7 @@ class TridiagonalToeplitz(LinearSystemMatrix):
             qc.cx(qr[i], qr[i + 1])
 
         # pylint: disable=unused-argument
-        def control(num_ctrl_qubits=1, label=None, ctrl_state=None):
+        def control(num_ctrl_qubits=1, label=None, ctrl_state=None, **kwargs):
             qr_state = QuantumRegister(self.num_state_qubits + 1)
             if self.num_state_qubits > 1:
                 qr_ancilla = AncillaRegister(max(1, self.num_state_qubits - 1))
@@ -432,7 +432,7 @@ class TridiagonalToeplitz(LinearSystemMatrix):
         qc_raw = QuantumCircuit(self.num_state_qubits)
 
         # pylint: disable=unused-argument
-        def control(num_ctrl_qubits=1, label=None, ctrl_state=None):
+        def control(num_ctrl_qubits=1, label=None, ctrl_state=None, **kwargs):
             qr_state = QuantumRegister(self.num_state_qubits + 1, "state")
             if self.num_state_qubits > 1:
                 qr_ancilla = AncillaRegister(max(1, self.num_state_qubits - 1))
