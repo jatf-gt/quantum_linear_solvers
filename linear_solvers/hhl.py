@@ -69,7 +69,7 @@ class HHL(LinearSolver):
         self._exact_reciprocal = True
         self.scaling = 1
 
-    # ── Properties ────────────────────────────────────────────────────────────
+    # -- Properties ------------------------------------------------------------
 
     @property
     def scaling(self) -> float:
@@ -80,7 +80,7 @@ class HHL(LinearSolver):
     def scaling(self, scaling: float) -> None:
         self._scaling = scaling
 
-    # ── Internal helpers ──────────────────────────────────────────────────────
+    # -- Internal helpers ------------------------------------------------------
 
     def _get_delta(
         self,
@@ -186,7 +186,7 @@ class HHL(LinearSolver):
 
         return result, expectation_results
 
-    # ── Main circuit construction ─────────────────────────────────────────────
+    # -- Main circuit construction ---------------------------------------------
 
     def construct_circuit(
         self,
@@ -207,7 +207,7 @@ class HHL(LinearSolver):
         -------
         QuantumCircuit encoding the HHL solution.
         """
-        # ── State preparation ─────────────────────────────────────────────────
+        # -- State preparation -------------------------------------------------
         if isinstance(vector, QuantumCircuit):
             nb = vector.num_qubits
             vector_circuit = vector
@@ -227,7 +227,7 @@ class HHL(LinearSolver):
 
         nf = 1  # number of flag qubits
 
-        # ── Hamiltonian simulation ────────────────────────────────────────────
+        # -- Hamiltonian simulation --------------------------------------------
         if isinstance(matrix, QuantumCircuit):
             matrix_circuit = matrix
         elif isinstance(matrix, (list, np.ndarray)):
@@ -276,7 +276,7 @@ class HHL(LinearSolver):
             delta = 1 / (2**nl)
             print("The solution will be calculated up to a scaling factor.")
 
-        # ── Reciprocal circuit ────────────────────────────────────────────────
+        # -- Reciprocal circuit ------------------------------------------------
         if self._exact_reciprocal:
             reciprocal_circuit = ExactReciprocal(nl, delta, neg_vals=neg_vals)
             na = matrix_circuit.num_ancillas
@@ -313,7 +313,7 @@ class HHL(LinearSolver):
             )
             na = max(matrix_circuit.num_ancillas, reciprocal_circuit.num_ancillas)
 
-        # ── Assemble the full circuit ─────────────────────────────────────────
+        # -- Assemble the full circuit -----------------------------------------
         qb = QuantumRegister(nb)   # b-register: RHS and solution
         ql = QuantumRegister(nl)   # l-register: clock / QPE eigenvalues
         qf = QuantumRegister(nf)   # flag qubit (ancilla)
@@ -357,7 +357,7 @@ class HHL(LinearSolver):
 
         return qc
 
-    # ── Public solve interface ────────────────────────────────────────────────
+    # -- Public solve interface ------------------------------------------------
 
     def solve(
         self,
