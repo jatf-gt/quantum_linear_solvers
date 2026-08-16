@@ -59,6 +59,7 @@ Matrices
    LinearSystemMatrix
    NumPyMatrix
    TridiagonalToeplitz
+   PentadiagonalToeplitz
 
 Observables
 ===========
@@ -75,7 +76,7 @@ Observables
 from .hhl import HHL
 from .numpy_linear_solver import NumPyLinearSolver
 from .linear_solver import LinearSolver, LinearSolverResult
-from .matrices import LinearSystemMatrix, NumPyMatrix, TridiagonalToeplitz
+from .matrices import LinearSystemMatrix, NumPyMatrix, TridiagonalToeplitz, PentadiagonalToeplitz
 from .observables import LinearSystemObservable, AbsoluteAverage, MatrixFunctional
 
 __all__ = [
@@ -86,6 +87,7 @@ __all__ = [
     "LinearSystemMatrix",
     "NumPyMatrix",
     "TridiagonalToeplitz",
+    "PentadiagonalToeplitz",
     "LinearSystemObservable",
     "AbsoluteAverage",
     "MatrixFunctional",
